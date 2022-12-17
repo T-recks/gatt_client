@@ -21,8 +21,10 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include "nvs.h"
-#include "nvs_flash.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
 
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
@@ -31,9 +33,47 @@
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event_loop.h"
+
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "lwip/sys.h"
+#include "lwip/netdb.h"
+#include "lwip/dns.h"
+
+/* The examples use simple WiFi configuration that you can set via
+   'make menuconfig'.
+
+   If you'd rather not, just change the below entries to strings with
+   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
+*/
+#define EXAMPLE_WIFI_SSID CONFIG_WIFI_SSID
+#define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
+
+/* FreeRTOS event group to signal when we are connected & ready to make a request */
+static EventGroupHandle_t wifi_event_group;
+
+/* The event group allows multiple bits for each event,
+   but we only care about one event - are we connected
+   to the AP with an IP? */
+const int CONNECTED_BIT = BIT0;
+
+const int BASE_LENGTH = 24;
+
+#define WEB_SERVER "10.20.96.190"
+#define WEB_PORT "8888"
+// static const char* WEB_URL = "https://vpmrgrrxvsov.runscope.net";
+static const char* WEB_URL = "http://10.20.96.190";
+
+
 
 #define GATTC_TAG "GATTC_DEMO"
+static const char* TAG = "SIMPLE_FORWARD";
 // #define REMOTE_NOTIFY_CHAR_UUID    0x108a
 // #define REMOTE_SERVICE_UUID         0x1400
 // #define REMOTE_NOTIFY_CHAR_UUID    0x1401
@@ -69,11 +109,12 @@ static uint8_t char_uuid128[ESP_UUID_LEN_128] = {0xBC, 0x8A, 0xBF, 0x45, 0xCA, 0
 
 // static const char remote_device_name[] = "sensor14a";
 static const char remote_device_name[] = "sens";
-static bool connect    = false;
+static bool ble_connect    = false;
 static bool get_server = false;
-static bool fwd_mode = false;
+static bool wifi_connect = false;
 static esp_gattc_char_elem_t *char_elem_result   = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
+esp_bd_addr_t last_connected_bda;
 
 /* Declare static functions */
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
@@ -136,17 +177,157 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
     },
 };
 
+static esp_err_t event_handler(void *ctx, system_event_t *event)
+{
+    switch(event->event_id) {
+    case SYSTEM_EVENT_STA_START:
+        ESP_LOGI(TAG, "esp32 connecting to Wifi");
+        esp_wifi_connect();
+        break;
+    case SYSTEM_EVENT_STA_GOT_IP:
+        ESP_LOGI(TAG, "esp32 got IP");
+        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        wifi_connect = true;
+        break;
+    case SYSTEM_EVENT_STA_DISCONNECTED:
+        ESP_LOGI(TAG, "esp32 disconnected from Wifi");
+        wifi_connect = false;
+        /* This is a workaround as ESP32 WiFi libs don't currently auto-reassociate. */
+        esp_wifi_connect();
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        break;
+    default:
+        break;
+    }
+    return ESP_OK;
+}
+
+static void initialise_wifi(void)
+{
+    tcpip_adapter_init();
+    wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
+    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = EXAMPLE_WIFI_SSID,
+            .password = EXAMPLE_WIFI_PASS,
+        },
+    };
+    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", wifi_config.sta.ssid);
+    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+    ESP_ERROR_CHECK( esp_wifi_start() );
+}
+
+static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
+{
+    char REQUEST[200];
+    char DATA[len*2];
+    char ADDR[ESP_BD_ADDR_LEN*2];
+
+    /* Convert address & data to hex strings */
+    for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
+        sprintf(ADDR+2*i, "%02x", addr[i]);
+    }
+    for (int i = 0; i < len; i++) {
+        sprintf(DATA+2*i, "%02x", data[i]);
+    }
+    
+    /* Generate request string */
+    sprintf(REQUEST,
+            "POST %s HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d \r\n\r\n{\"address\":\"%s\",\"data\":\"%s\"}",
+            WEB_URL, 24 + len*2 + ESP_BD_ADDR_LEN*2, ADDR, DATA);
+
+    const struct addrinfo hints = {
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM,
+    };
+    struct addrinfo *res;
+    int s, r;
+    char recv_buf[64];
+
+    ESP_LOGI(TAG, "%s", REQUEST);
+
+    /* Wait for connection */
+    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
+
+    /* DNS Lookup */
+    int err = getaddrinfo(WEB_SERVER, WEB_PORT, &hints, &res);
+    if(err != 0 || res == NULL) {
+        ESP_LOGE(TAG, "DNS lookup failed err=%d res=%p", err, res);
+        return;
+    }
+
+    /* Set Up Socket */
+    s = socket(res->ai_family, res->ai_socktype, 0);
+    if(s < 0) {
+        ESP_LOGE(TAG, "... Failed to allocate socket.");
+        freeaddrinfo(res);
+        return;
+    }
+
+    /* Connect to Server */
+    if(connect(s, res->ai_addr, res->ai_addrlen) != 0) {
+        ESP_LOGE(TAG, "... socket connect failed errno=%d", errno);
+        close(s);
+        freeaddrinfo(res);
+        return;
+    }
+    freeaddrinfo(res);
+
+    /* Send Request */
+    if (write(s, REQUEST, strlen(REQUEST)) < 0) {
+        ESP_LOGE(TAG, "... socket send failed");
+        close(s);
+        return;
+    }
+
+    /* Set Timeout & Wait for Response */
+    struct timeval receiving_timeout;
+    receiving_timeout.tv_sec = 5;
+    receiving_timeout.tv_usec = 0;
+    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &receiving_timeout,
+            sizeof(receiving_timeout)) < 0) {
+        ESP_LOGE(TAG, "... failed to set socket receiving timeout");
+        close(s);
+        return;
+    }
+
+    /* Read HTTP response */
+    do {
+        bzero(recv_buf, sizeof(recv_buf));
+        r = read(s, recv_buf, sizeof(recv_buf)-1);
+
+        for(int i = 0; i < r; i++) {
+            putchar(recv_buf[i]);
+        }
+
+    } while(r > 0);
+
+    putchar('\n');
+    close(s);
+
+    return;
+}
+
 void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     return;
 }
 
 void handle_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     esp_log_buffer_hex(GATTC_TAG, p_data->notify.value, p_data->notify.value_len);
-    if (fwd_mode) {
+    if (wifi_connect) {
         fwd_recv_data(p_data);
     } else {
         store_recv_data(p_data);
     }
+}
+
+void fwd_recv_data(esp_ble_gattc_cb_param_t* p_data) {
+    http_post_task(last_connected_bda, p_data->notify.value, p_data->notify.value_len);
 }
 
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
@@ -366,7 +547,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         ESP_LOGI(GATTC_TAG, "write char success ");
         break;
     case ESP_GATTC_DISCONNECT_EVT:
-        connect = false;
+        ble_connect = false;
         get_server = false;
         ESP_LOGI(GATTC_TAG, "ESP_GATTC_DISCONNECT_EVT, reason = %d", p_data->disconnect.reason);
         break;
@@ -401,6 +582,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         switch (scan_result->scan_rst.search_evt) {
         case ESP_GAP_SEARCH_INQ_RES_EVT:
             esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
+            memcpy(last_connected_bda, scan_result->scan_rst.bda, sizeof(esp_bd_addr_t));
             ESP_LOGI(GATTC_TAG, "searched Adv Data Len %d, Scan Response Len %d", scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
             // adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
             //                                     ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
@@ -425,8 +607,8 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             if (adv_name != NULL) {
                 if (strlen(remote_device_name) == adv_name_len && strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
                     ESP_LOGI(GATTC_TAG, "searched device %s\n", remote_device_name);
-                    if (connect == false) {
-                        connect = true;
+                    if (ble_connect == false) {
+                        ble_connect = true;
                         ESP_LOGI(GATTC_TAG, "connect to the remote device.");
                         esp_ble_gap_stop_scanning();
                         esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if, scan_result->scan_rst.bda, scan_result->scan_rst.ble_addr_type, true);
@@ -563,5 +745,7 @@ void app_main(void)
     if (local_mtu_ret){
         ESP_LOGE(GATTC_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
+
+    initialise_wifi();
 
 }
