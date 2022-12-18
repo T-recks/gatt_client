@@ -46,6 +46,8 @@
 #include "lwip/netdb.h"
 #include "lwip/dns.h"
 
+#include "driver/gpio.h"
+
 /* The examples use simple WiFi configuration that you can set via
    'make menuconfig'.
 
@@ -54,6 +56,10 @@
 */
 #define EXAMPLE_WIFI_SSID CONFIG_WIFI_SSID
 #define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
+
+// LED Config
+#define BLINK_GPIO CONFIG_BLINK_GPIO
+
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -70,7 +76,7 @@ const int BASE_LENGTH = 24;
 // static const char* WEB_URL = "https://vpmrgrrxvsov.runscope.net";
 static const char* WEB_URL = "http://10.20.96.190";
 
-
+static uint8_t s_led_state = 0;
 
 #define GATTC_TAG "GATTC_DEMO"
 static const char* TAG = "SIMPLE_FORWARD";
@@ -177,6 +183,22 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
     },
 };
 
+void set_wifi_status(bool connected);
+
+static void blink_led(void)
+{
+    /* Set the GPIO level according to the state (LOW or HIGH)*/
+    gpio_set_level(BLINK_GPIO, s_led_state);
+}
+
+static void configure_led(void)
+{
+    ESP_LOGI(TAG, "Configured to blink GPIO LED!");
+    gpio_reset_pin(BLINK_GPIO);
+    /* Set the GPIO as a push/pull output */
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+}
+
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     switch(event->event_id) {
@@ -186,15 +208,15 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         ESP_LOGI(TAG, "esp32 got IP");
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         wifi_connect = true;
+        set_wifi_status(true);
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         ESP_LOGI(TAG, "esp32 disconnected from Wifi");
+        set_wifi_status(false);
         wifi_connect = false;
         /* This is a workaround as ESP32 WiFi libs don't currently auto-reassociate. */
         esp_wifi_connect();
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         break;
     default:
         break;
@@ -224,7 +246,7 @@ static void initialise_wifi(void)
 
 static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
 {
-    char REQUEST[200];
+    char REQUEST[142];
     char DATA[len*2];
     char ADDR[ESP_BD_ADDR_LEN*2];
 
@@ -239,7 +261,7 @@ static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
     /* Generate request string */
     sprintf(REQUEST,
             "POST %s HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d \r\n\r\n{\"address\":\"%s\",\"data\":\"%s\"}",
-            WEB_URL, 24 + len*2 + ESP_BD_ADDR_LEN*2, ADDR, DATA);
+            WEB_URL, 16 + len*2 + ESP_BD_ADDR_LEN*2, ADDR, DATA);
 
     const struct addrinfo hints = {
         .ai_family = AF_INET,
@@ -315,6 +337,19 @@ static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
 
 void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     return;
+}
+
+void set_wifi_status(bool connected) {
+    // wifi_connect = connected;
+    if (connected) {
+        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        s_led_state = 1;
+        blink_led();
+    } else {
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        s_led_state = 0;
+        blink_led();
+    }
 }
 
 void handle_recv_data(esp_ble_gattc_cb_param_t* p_data) {
@@ -684,6 +719,9 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
 
 void app_main(void)
 {
+    // Initialize LED
+    configure_led();
+
     // Initialize NVS.
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
