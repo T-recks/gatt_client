@@ -48,6 +48,17 @@
 
 #include "driver/gpio.h"
 
+#include "driver/sdmmc_host.h"
+#include "sd_card/sd_card_make_file.h"
+#include <sys/unistd.h>
+#include <sys/stat.h>
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+
+//static const char *TAG = "app_main_make_file";
+#define MOUNT_POINT "/sdcard";
+char *filename = "/collected_data.txt";
+
 /* The examples use simple WiFi configuration that you can set via
    'make menuconfig'.
 
@@ -84,7 +95,7 @@ static const char* WEB_URL = "http://10.20.96.190";
 static uint8_t s_led_state = 0;
 
 #define GATTC_TAG "GATTC_DEMO"
-static const char* TAG = "SIMPLE_FORWARD";
+static const char *TAG = "SIMPLE_FORWARD";
 // #define REMOTE_NOTIFY_CHAR_UUID    0x108a
 // #define REMOTE_SERVICE_UUID         0x1400
 // #define REMOTE_NOTIFY_CHAR_UUID    0x1401
@@ -187,6 +198,18 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
         .gattc_if = ESP_GATT_IF_NONE,       /* Not get the gatt_if, so initial is ESP_GATT_IF_NONE */
     },
 };
+
+struct sd_card_obj {
+    bool ready;
+    esp_err_t ret;
+    sdmmc_card_t *card;
+    sdmmc_host_t host; 
+    sdmmc_slot_config_t slot_config;
+    esp_vfs_fat_sdmmc_mount_config_t mount_config;
+    const char mount_point[];
+};
+
+struct sd_card_obj global_sdcard = {.ready = false, .mount_point = MOUNT_POINT,};
 
 void set_wifi_status(bool connected);
 
@@ -340,9 +363,186 @@ static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
     return;
 }
 
-void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
+void sd_card_deactivate(const char *mount_point, sdmmc_card_t *card){
+    //cleanup sd connection after finishing
+    //free(text_data);
+    global_sdcard.ready = false;
+    esp_vfs_fat_sdcard_unmount(mount_point, card);
+    //sdmmc_host_deinit();
+    ESP_LOGI(TAG, "Card unmounted");
+    //sd_card_deactivate(TAG, mount_point, card, host);
+    // if(ret != ESP_OK){
+    //     ESP_LOGE(TAG, "There was an error in creating/writing to a file with error: (%s)", esp_err_to_name(ret));
+    // }
     return;
 }
+
+void read_collectedv_data(esp_ble_gattc_cb_param_t* p_data){
+
+    if(!global_sdcard.ready){
+            //global_sdcard.mount_config = {
+        #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
+            global_sdcard.mount_config.format_if_mount_failed = true;
+        #else
+            global_sdcard.mount_config.format_if_mount_failed = false;
+        #endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
+            global_sdcard.mount_config.max_files = 5;
+            global_sdcard.mount_config.allocation_unit_size = 16 * 1024;
+        //};
+        //bool ready = false;
+        //esp_err_t ret;
+        global_sdcard.ret = ESP_OK;
+        //sdmmc_card_t *card;
+        //const char mount_point[] = MOUNT_POINT;
+        ESP_LOGI(TAG, "Using SDMMC peripheral");
+        //sdmmc_host_t host = SDMMC_HOST_DEFAULT(); 
+        //sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        global_sdcard->host = SDMMC_HOST_DEFAULT(); 
+        global_sdcard.slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        //printf("%s",slot_config.d0);
+        ESP_LOGI(TAG, "Initializing SD card");
+
+        #ifdef CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1
+            global_sdcard.slot_config.width = 1;
+        #else
+            global_sdcard.slot_config.width = 1;
+        #endif
+        #ifdef CONFIG_SOC_SDMMC_USE_GPIO_MATRIX
+            global_sdcard.slot_config.clk = CONFIG_EXAMPLE_PIN_CLK;
+            global_sdcard.slot_config.cmd = CONFIG_EXAMPLE_PIN_CMD;
+            global_sdcard.slot_config.d0 = CONFIG_EXAMPLE_PIN_D0;
+        #ifdef CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4
+            global_sdcard.slot_config.d1 = CONFIG_EXAMPLE_PIN_D1;
+            global_sdcard.slot_config.d2 = CONFIG_EXAMPLE_PIN_D2;
+            global_sdcard.slot_config.d3 = CONFIG_EXAMPLE_PIN_D3;
+        #endif  // CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4
+        #endif  // CONFIG_SOC_SDMMC_USE_GPIO_MATRIX
+
+        global_sdcard.slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+        //instantiate and configue sd_card properties
+        //sd_card_init(TAG, ret, card, mount_config, mount_point, slot_config, host);
+        ESP_LOGI(TAG, "Mounting filesystem");
+        global_sdcard.ret = esp_vfs_fat_sdmmc_mount(global_sdcard.mount_point, &global_sdcard.host, &global_sdcard.slot_config, &global_sdcard.mount_config, &global_sdcard.card);
+
+        if (global_sdcard.ret != ESP_OK) {
+            if (global_sdcard.ret == ESP_FAIL) {
+                ESP_LOGE(TAG, "Failed to mount filesystem."
+                        "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+            } else {
+                ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                        "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(global_sdcard.ret));
+            }
+            return;
+        }
+        global_sdcard.ready = true;
+        ESP_LOGI(TAG, "Filesystem mounted");
+    }
+    else{
+        ESP_LOGI(TAG, "Filesystem Already Mounted; Proceeding with reading from storage");
+    }
+    size_t bytes_to_read = sizeof(p_data->notify.value_len);
+    sd_card_read_file(global_sdcard.ready, filename, p_data->notify.value, bytes_to_read, TAG, global_sdcard.ret, global_sdcard.card, global_sdcard.mount_point);
+    if(global_sdcard.ret != ESP_OK){
+        ESP_LOGE(TAG, "There was an error in creating/writing to a file with error: (%s)", esp_err_to_name(global_sdcard.ret));
+    }
+
+    sd_card_deactivate(global_sdcard.mount_point, global_sdcard.card);
+}
+
+void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
+    //need to check that the cb is in listening?
+    if(!p_data->notify.is_notify){
+        return;
+    }
+    if(!global_sdcard.ready){
+        //    global_sdcard.mount_config = {
+           #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
+            global_sdcard.mount_config.format_if_mount_failed = true;
+        #else
+            global_sdcard.mount_config.format_if_mount_failed = false;
+        #endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
+            global_sdcard.mount_config.max_files = 5;
+            global_sdcard.mount_config.allocation_unit_size = 16 * 1024;
+        //};
+        //bool ready = false;
+        //esp_err_t ret;
+        global_sdcard.ret = ESP_OK;
+        //sdmmc_card_t *card;
+        //const char mount_point[] = MOUNT_POINT;
+        ESP_LOGI(TAG, "Using SDMMC peripheral");
+        //sdmmc_host_t host = SDMMC_HOST_DEFAULT(); 
+        //sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        global_sdcard.host = SDMMC_HOST_DEFAULT(); 
+        global_sdcard.slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        //printf("%s",slot_config.d0);
+        ESP_LOGI(TAG, "Initializing SD card");
+
+        #ifdef CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1
+            global_sdcard.slot_config.width = 1;
+        #else
+            global_sdcard.slot_config.width = 1;
+        #endif
+        #ifdef CONFIG_SOC_SDMMC_USE_GPIO_MATRIX
+            global_sdcard.slot_config.clk = CONFIG_EXAMPLE_PIN_CLK;
+            global_sdcard.slot_config.cmd = CONFIG_EXAMPLE_PIN_CMD;
+            global_sdcard.slot_config.d0 = CONFIG_EXAMPLE_PIN_D0;
+        #ifdef CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4
+            global_sdcard.slot_config.d1 = CONFIG_EXAMPLE_PIN_D1;
+            global_sdcard.slot_config.d2 = CONFIG_EXAMPLE_PIN_D2;
+            global_sdcard.slot_config.d3 = CONFIG_EXAMPLE_PIN_D3;
+        #endif  // CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4
+        #endif  // CONFIG_SOC_SDMMC_USE_GPIO_MATRIX
+
+        global_sdcard.slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+        //instantiate and configue sd_card properties
+        //sd_card_init(TAG, ret, card, mount_config, mount_point, slot_config, host);
+        ESP_LOGI(TAG, "Mounting filesystem");
+        global_sdcard.ret = esp_vfs_fat_sdmmc_mount(global_sdcard.mount_point, &global_sdcard.host, &global_sdcard.slot_config, &global_sdcard.mount_config, &global_sdcard.card);
+
+        if (global_sdcard.ret != ESP_OK) {
+            if (global_sdcard.ret == ESP_FAIL) {
+                ESP_LOGE(TAG, "Failed to mount filesystem."
+                        "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+            } else {
+                ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                        "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(global_sdcard.ret));
+            }
+            return;
+        }
+        global_sdcard.ready = true;
+        ESP_LOGI(TAG, "Filesystem mounted");
+    }
+    else{
+        ESP_LOGI(TAG, "Filesystem Already Mounted; Proceeding with writing to storage");
+    }
+
+    // Card has been initialized, print its properties
+    sdmmc_card_print_info(stdout, global_sdcard.card);
+    //make file
+    size_t bytes_to_write = sizeof(p_data->notify.value_len);
+    sd_card_write_file(global_sdcard.ready, filename, p_data->notify.value, bytes_to_write, TAG, global_sdcard.ret, global_sdcard.card, global_sdcard.mount_point);
+    if(global_sdcard.ret == ESP_FAIL){
+        ESP_LOGE(TAG, "There was an error in creating/writing to a file with error: (%s)", esp_err_to_name(global_sdcard.ret));
+        return;
+    }
+
+    // sd_card_read_file(ready, filename, data_array, bytes_to_write, TAG, ret, card, mount_point);
+    // if(ret != ESP_OK){
+    //     ESP_LOGE(TAG, "There was an error in creating/writing to a file with error: (%s)", esp_err_to_name(ret));
+    // }
+    // //cleanup sd connection after finishing
+    // //free(text_data);
+    // esp_vfs_fat_sdcard_unmount(mount_point, card);
+    // //sdmmc_host_deinit();
+    // ESP_LOGI(TAG, "Card unmounted");
+    // //sd_card_deactivate(TAG, mount_point, card, host);
+    // // if(ret != ESP_OK){
+    // //     ESP_LOGE(TAG, "There was an error in creating/writing to a file with error: (%s)", esp_err_to_name(ret));
+    // // }
+    sd_card_deactivate(global_sdcard.mount_point, global_sdcard.card);
+    return;
+}
+
 
 void set_wifi_status(bool connected) {
     // wifi_connect = connected;

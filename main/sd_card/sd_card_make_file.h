@@ -1,0 +1,2 @@
+esp_err_t sd_card_write_file(bool ready, char *filename, uint8_t *incoming_data, size_t bytes_to_write, const char *TAG, esp_err_t ret,sdmmc_card_t *card, const char *mount_point);
+esp_err_t sd_card_read_file(bool ready, char *filename, uint8_t *data_array, size_t bytes_to_read, const char *TAG, esp_err_t ret,sdmmc_card_t *card, const char *mount_point);
