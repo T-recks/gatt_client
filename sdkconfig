@@ -133,8 +133,19 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Wi-Fi Configuration
+#
+CONFIG_WIFI_SSID="kingman-slow"
+CONFIG_WIFI_PASSWORD="ayupargrapuya"
+# end of Wi-Fi Configuration
+
+#
 # Example Configuration
 #
+CONFIG_BLINK_LED_GPIO=y
+# CONFIG_BLINK_LED_RMT is not set
+CONFIG_BLINK_GPIO=13
+CONFIG_BLINK_PERIOD=1000
 # CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP is not set
 # end of Example Configuration
 
