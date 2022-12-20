@@ -397,7 +397,7 @@ void read_collectedv_data(esp_ble_gattc_cb_param_t* p_data){
         ESP_LOGI(TAG, "Using SDMMC peripheral");
         //sdmmc_host_t host = SDMMC_HOST_DEFAULT(); 
         //sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-        global_sdcard->host = SDMMC_HOST_DEFAULT(); 
+        global_sdcard.host = SDMMC_HOST_DEFAULT(); 
         global_sdcard.slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
         //printf("%s",slot_config.d0);
         ESP_LOGI(TAG, "Initializing SD card");
