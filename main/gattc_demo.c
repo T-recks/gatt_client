@@ -77,7 +77,7 @@ const int CONNECTED_BIT = BIT0;
 const int BASE_LENGTH = 24;
 
 #define WEB_SERVER "10.20.96.190"
-#define WEB_PORT "8888"
+#define WEB_PORT "8000"
 // static const char* WEB_URL = "https://vpmrgrrxvsov.runscope.net";
 static const char* WEB_URL = "http://10.20.96.190";
 
@@ -214,7 +214,7 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     case SYSTEM_EVENT_STA_GOT_IP:
         ESP_LOGI(TAG, "esp32 got IP");
         wifi_connect = true;
-        // set_wifi_status(true);
+        set_wifi_status(true);
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         ESP_LOGI(TAG, "esp32 disconnected from Wifi");
