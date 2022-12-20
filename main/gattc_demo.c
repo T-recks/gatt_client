@@ -249,24 +249,17 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK( esp_wifi_start() );
 }
 
-static void http_post_task(uint8_t * addr, uint8_t * data, size_t len)
+static void tcp_send_task(uint8_t * data, size_t len)
 {
     char REQUEST[142];
     char DATA[len*2];
-    char ADDR[ESP_BD_ADDR_LEN*2];
 
-    /* Convert address & data to hex strings */
-    for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
-        sprintf(ADDR+2*i, "%02x", addr[i]);
-    }
     for (int i = 0; i < len; i++) {
         sprintf(DATA+2*i, "%02x", data[i]);
     }
     
     /* Generate request string */
-    sprintf(REQUEST,
-            "POST %s HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d \r\n\r\n{\"address\":\"%s\",\"data\":\"%s\"}",
-            WEB_URL, 16 + len*2 + ESP_BD_ADDR_LEN*2, ADDR, DATA);
+    sprintf(REQUEST, "%s\n", DATA);
 
     const struct addrinfo hints = {
         .ai_family = AF_INET,
@@ -367,7 +360,7 @@ void handle_recv_data(esp_ble_gattc_cb_param_t* p_data) {
 }
 
 void fwd_recv_data(esp_ble_gattc_cb_param_t* p_data) {
-    http_post_task(last_connected_bda, p_data->notify.value, p_data->notify.value_len);
+    tcp_send_task(p_data->notify.value, p_data->notify.value_len);
 }
 
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
