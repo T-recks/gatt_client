@@ -95,6 +95,8 @@ static const char* TAG = "SIMPLE_FORWARD";
 
 #define CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP 0
 
+#define SCAN_DURATION 300
+
 //static uint8_t gatts_uuid128[ESP_UUID_LEN_128] = {0x70,0x6C,0x98,0x41,0xCE,0x43,0x14,0xA9,
 //                                                  0xB5,0x4D,0x22,0x2B,0x89,0x10,0xE6,0x32};
 
@@ -202,7 +204,7 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
 /*
  * STORAGE setup
  */
-#define PACKET_STORE_LIMIT 4
+#define PACKET_STORE_LIMIT 2
 #define PACKET_SIZE 16
 static int packet_store_count = 0;
 typedef uint8_t sensor_packet_t[16];
@@ -232,21 +234,22 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     switch(event->event_id) {
     case SYSTEM_EVENT_STA_START:
         ESP_LOGI(TAG, "esp32 connecting to Wifi");
-        // esp_wifi_connect();
+        esp_wifi_connect();
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         ESP_LOGI(TAG, "esp32 got IP");
         // cond_wifi_conn = true;
-        // set_wifi_status(true);
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        set_wifi_status(true);
+        // xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        fwd_stored_data();
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         ESP_LOGI(TAG, "esp32 disconnected from Wifi");
-        // set_wifi_status(false);
+        set_wifi_status(false);
         // cond_wifi_conn = false;
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        // xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         /* This is a workaround as ESP32 WiFi libs don't currently auto-reassociate. */
-        // esp_wifi_connect();
+        esp_wifi_connect();
         break;
     default:
         break;
@@ -403,7 +406,6 @@ void set_wifi_status(bool connected) {
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         s_led_state = 1;
         blink_led();
-        fwd_stored_data();
     } else {
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         s_led_state = 0;
@@ -430,10 +432,17 @@ void handle_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     }
 }
 
+void reset_buffer() {
+    memset(BUFFER, 0, sizeof(BUFFER));
+    packet_store_count = 0;
+    cond_full = false;
+}
+
 void fwd_stored_data() {
     int errno;
     // xEventGroupWaitBits(storage_event_group, STORAGE_SEMA, false, true, portMAX_DELAY);
     // xEventGroupClearBits(storage_event_group, STORAGE_SEMA);
+    // xEventGroupWaitBits(wifi_event_group, CONNECT_BIT, false, true, portMAX_DELAY);
     for (int i = packet_store_count-1; i >= 0; i--) {
         memcpy(sensor_packet, BUFFER+(PACKET_SIZE*(packet_store_count-1)), PACKET_SIZE);
         errno = tcp_send_task(sensor_packet, PACKET_SIZE);
@@ -447,9 +456,10 @@ void fwd_stored_data() {
         }
     }
     // xEventGroupSetBits(storage_event_group, STORAGE_SEMA);
+    reset_buffer();
     ESP_LOGI(TAG, "Forward stored data DONE.");
-    // esp_ble_gap_start_scanning(30);
-    esp_restart();
+    esp_ble_gap_start_scanning(SCAN_DURATION);
+    // esp_restart();
 }
 
 void fwd_recv_data(esp_ble_gattc_cb_param_t* p_data) {
@@ -690,8 +700,8 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     switch (event) {
     case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT: {
         //the unit of the duration is second
-        uint32_t duration = 30;
-        esp_ble_gap_start_scanning(duration);
+        // uint32_t duration = 30;
+        esp_ble_gap_start_scanning(SCAN_DURATION);
         break;
     }
     case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
@@ -707,15 +717,15 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         esp_ble_gap_cb_param_t *scan_result = (esp_ble_gap_cb_param_t *)param;
         switch (scan_result->scan_rst.search_evt) {
         case ESP_GAP_SEARCH_INQ_RES_EVT:
-            esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
-            ESP_LOGI(GATTC_TAG, "searched Adv Data Len %d, Scan Response Len %d", scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
+            // esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
+            // ESP_LOGI(GATTC_TAG, "searched Adv Data Len %d, Scan Response Len %d", scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
             // adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
             //                                     ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
             adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
                                                 ESP_BLE_AD_TYPE_NAME_SHORT, &adv_name_len);
 
-            ESP_LOGI(GATTC_TAG, "searched Device Name Len %d", adv_name_len);
-            esp_log_buffer_char(GATTC_TAG, adv_name, adv_name_len);
+            // ESP_LOGI(GATTC_TAG, "searched Device Name Len %d", adv_name_len);
+            // esp_log_buffer_char(GATTC_TAG, adv_name, adv_name_len);
 
 #if CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
             if (scan_result->scan_rst.adv_data_len > 0) {
@@ -727,7 +737,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
                 esp_log_buffer_hex(GATTC_TAG, &scan_result->scan_rst.ble_adv[scan_result->scan_rst.adv_data_len], scan_result->scan_rst.scan_rsp_len);
             }
 #endif
-            ESP_LOGI(GATTC_TAG, "\n");
+            // ESP_LOGI(GATTC_TAG, "\n");
 
             if (adv_name != NULL) {
                 if (strlen(remote_device_name) == adv_name_len && strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
