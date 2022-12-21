@@ -76,7 +76,8 @@ const int CONNECTED_BIT = BIT0;
 
 const int BASE_LENGTH = 24;
 
-#define WEB_SERVER "10.20.96.190"
+// #define WEB_SERVER "10.20.96.190"
+#define WEB_SERVER "10.20.96.221"
 #define WEB_PORT "8000"
 // static const char* WEB_URL = "https://vpmrgrrxvsov.runscope.net";
 // static const char* WEB_URL = "http://10.20.96.190";
@@ -555,7 +556,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         }else{
             ESP_LOGI(GATTC_TAG, "ESP_GATTC_NOTIFY_EVT, receive indicate value:");
         }
-        // handle_recv_data(p_data);
+        handle_recv_data(p_data);
         break;
     case ESP_GATTC_WRITE_DESCR_EVT:
         if (p_data->write.status != ESP_GATT_OK){
