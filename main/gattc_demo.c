@@ -192,8 +192,10 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
  * STORAGE setup
  */
 #define PACKET_STORE_LIMIT 4
-static int PACKET_STORE_COUNT = 0;
+static uint8_t PACKET_STORE_COUNT = 0;
 typedef uint8_t sensor_packet_t[16];
+sensor_packet_t sensor_packet;
+uint8_t sensor_packet_set[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
 static uint8_t BUFFER[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
 
 void set_wifi_status(bool connected);
@@ -257,7 +259,7 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK( esp_wifi_start() );
 }
 
-static void tcp_send_task(uint8_t * data, size_t len)
+static void tcp_send_task(uint8_t *data, size_t len)
 {
     char REQUEST[142];
     char DATA[len*2];
@@ -341,13 +343,25 @@ static void tcp_send_task(uint8_t * data, size_t len)
     return;
 }
 
-void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
-    if (PACKET_STORE_COUNT < PACKET_STORE_LIMIT) {
-        // store the data
-    } else {
-        // drop the data
-        ESPLOGI(GATTC_TAG, "DROP");
-    }
+void store_recv_data(esp_ble_gattc_cb_param_t *p_data) {
+    
+    //for(int incoming_measurements = 0; ;incoming_measurements++){
+        if (PACKET_STORE_COUNT < PACKET_STORE_LIMIT) {
+            // store the data
+            ESP_LOGI(TAG, "Storing %d measurement", PACKET_STORE_COUNT);
+            //BUFFER[PACKET_STORE_COUNT] = p_data->notify.value;
+            memcpy(BUFFER+(PACKET_STORE_COUNT*sizeof(sensor_packet_t)),p_data->notify.value,sizeof(sensor_packet_t));
+            PACKET_STORE_COUNT += 1;
+        } 
+        else {
+            // drop the data
+            ESP_LOGI(TAG, "Sending the Packets Over");
+            //copy over the buffer to the sensor_packet object
+            memcpy(sensor_packet_set,BUFFER,sizeof(BUFFER));
+            memset(BUFFER,0,sizeof(BUFFER));
+            tcp_send_task(sensor_packet_set, sizeof(sensor_packet_set));
+        }
+    //}
     return;
 }
 
