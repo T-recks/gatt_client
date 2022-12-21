@@ -188,6 +188,14 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
     },
 };
 
+/*
+ * STORAGE setup
+ */
+#define PACKET_STORE_LIMIT 4
+static int PACKET_STORE_COUNT = 0;
+typedef uint8_t sensor_packet_t[16];
+static uint8_t BUFFER[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
+
 void set_wifi_status(bool connected);
 
 static void blink_led(void)
@@ -316,7 +324,7 @@ static void tcp_send_task(uint8_t * data, size_t len)
         return;
     }
 
-    /* Read HTTP response */
+    /* Read response */
     do {
         bzero(recv_buf, sizeof(recv_buf));
         r = read(s, recv_buf, sizeof(recv_buf)-1);
