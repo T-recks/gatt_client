@@ -456,7 +456,7 @@ void store_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     }
     if(!global_sdcard.ready){
         //    global_sdcard.mount_config = {
-           #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
+        #ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
             global_sdcard.mount_config.format_if_mount_failed = true;
         #else
             global_sdcard.mount_config.format_if_mount_failed = false;
