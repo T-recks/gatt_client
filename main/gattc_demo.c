@@ -68,18 +68,19 @@ static QueueHandle_t gpio_evt_queue = NULL;
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
+static EventGroupHandle_t storage_event_group;
 
 /* The event group allows multiple bits for each event,
    but we only care about one event - are we connected
    to the AP with an IP? */
 const int CONNECTED_BIT = BIT0;
+const int STORAGE_SEMA = BIT1;
 
 const int BASE_LENGTH = 24;
 
 #define WEB_SERVER "10.20.96.190"
 #define WEB_PORT "8000"
-// static const char* WEB_URL = "https://vpmrgrrxvsov.runscope.net";
-static const char* WEB_URL = "http://10.20.96.190";
+// static const char* WEB_URL = "http://10.20.96.190";
 
 static uint8_t s_led_state = 0;
 
@@ -118,14 +119,23 @@ static uint8_t gatts_uuid128[ESP_UUID_LEN_128] = {0xBC, 0x8A, 0xBF, 0x45, 0xCA, 
 static uint8_t char_uuid128[ESP_UUID_LEN_128] = {0xBC, 0x8A, 0xBF, 0x45, 0xCA, 0x05, 0x50, 0xBA,
                                                  0x40, 0x42, 0xB0, 0x00, 0x01, 0x14, 0x64, 0xF3};
 
-// static const char remote_device_name[] = "sensor14a";
 static const char remote_device_name[] = "sens";
-static bool ble_connect    = false;
-static bool get_server = false;
-static bool wifi_connect = false;
 static esp_gattc_char_elem_t *char_elem_result   = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 esp_bd_addr_t last_connected_bda;
+
+
+// STATES
+#define RECV 1
+#define WAIT 2
+#define SEND 3
+// CONDITIONS (for state transition)
+static bool cond_ble_conn = false;
+static bool get_server = false;
+static bool cond_full = false;
+static bool cond_empty = true;
+static bool cond_wifi_conn = false;
+
 
 /* Declare static functions */
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
@@ -133,6 +143,7 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 void store_recv_data(esp_ble_gattc_cb_param_t* p_data);
 void fwd_recv_data(esp_ble_gattc_cb_param_t* p_data);
+void fwd_stored_data();
 void handle_recv_data(esp_ble_gattc_cb_param_t* p_data);
 
 // static esp_bt_uuid_t remote_filter_service_uuid = {
@@ -192,11 +203,13 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
  * STORAGE setup
  */
 #define PACKET_STORE_LIMIT 4
-static uint8_t PACKET_STORE_COUNT = 0;
+#define PACKET_SIZE 16
+static int packet_store_count = 0;
 typedef uint8_t sensor_packet_t[16];
-sensor_packet_t sensor_packet;
-uint8_t sensor_packet_set[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
-static uint8_t BUFFER[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
+// sensor_packet_t sensor_packet;
+static uint8_t sensor_packet[16];
+// uint8_t sensor_packet_set[sizeof(sensor_packet_t) * PACKET_STORE_LIMIT];
+static uint8_t BUFFER[PACKET_SIZE * PACKET_STORE_LIMIT];
 
 void set_wifi_status(bool connected);
 
@@ -219,19 +232,21 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     switch(event->event_id) {
     case SYSTEM_EVENT_STA_START:
         ESP_LOGI(TAG, "esp32 connecting to Wifi");
-        esp_wifi_connect();
+        // esp_wifi_connect();
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         ESP_LOGI(TAG, "esp32 got IP");
-        wifi_connect = true;
-        set_wifi_status(true);
+        // cond_wifi_conn = true;
+        // set_wifi_status(true);
+        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         ESP_LOGI(TAG, "esp32 disconnected from Wifi");
-        set_wifi_status(false);
-        wifi_connect = false;
+        // set_wifi_status(false);
+        // cond_wifi_conn = false;
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         /* This is a workaround as ESP32 WiFi libs don't currently auto-reassociate. */
-        esp_wifi_connect();
+        // esp_wifi_connect();
         break;
     default:
         break;
@@ -259,7 +274,7 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK( esp_wifi_start() );
 }
 
-static void tcp_send_task(uint8_t *data, size_t len)
+static int tcp_send_task(uint8_t *data, size_t len)
 {
     char REQUEST[142];
     char DATA[len*2];
@@ -282,13 +297,13 @@ static void tcp_send_task(uint8_t *data, size_t len)
     ESP_LOGI(TAG, "%s", REQUEST);
 
     /* Wait for connection */
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
+    // xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
 
     /* DNS Lookup */
     int err = getaddrinfo(WEB_SERVER, WEB_PORT, &hints, &res);
     if(err != 0 || res == NULL) {
         ESP_LOGE(TAG, "DNS lookup failed err=%d res=%p", err, res);
-        return;
+        return 1;
     }
 
     /* Set Up Socket */
@@ -296,7 +311,7 @@ static void tcp_send_task(uint8_t *data, size_t len)
     if(s < 0) {
         ESP_LOGE(TAG, "... Failed to allocate socket.");
         freeaddrinfo(res);
-        return;
+        return 1;
     }
 
     /* Connect to Server */
@@ -304,7 +319,7 @@ static void tcp_send_task(uint8_t *data, size_t len)
         ESP_LOGE(TAG, "... socket connect failed errno=%d", errno);
         close(s);
         freeaddrinfo(res);
-        return;
+        return 1;
     }
     freeaddrinfo(res);
 
@@ -312,7 +327,7 @@ static void tcp_send_task(uint8_t *data, size_t len)
     if (write(s, REQUEST, strlen(REQUEST)) < 0) {
         ESP_LOGE(TAG, "... socket send failed");
         close(s);
-        return;
+        return 1;
     }
 
     /* Set Timeout & Wait for Response */
@@ -323,7 +338,7 @@ static void tcp_send_task(uint8_t *data, size_t len)
             sizeof(receiving_timeout)) < 0) {
         ESP_LOGE(TAG, "... failed to set socket receiving timeout");
         close(s);
-        return;
+        return 1;
     }
 
     /* Read response */
@@ -340,37 +355,55 @@ static void tcp_send_task(uint8_t *data, size_t len)
     putchar('\n');
     close(s);
 
-    return;
+    return 0;
 }
 
 void store_recv_data(esp_ble_gattc_cb_param_t *p_data) {
-    
-    //for(int incoming_measurements = 0; ;incoming_measurements++){
-        if (PACKET_STORE_COUNT < PACKET_STORE_LIMIT) {
-            // store the data
-            ESP_LOGI(TAG, "Storing %d measurement", PACKET_STORE_COUNT);
-            //BUFFER[PACKET_STORE_COUNT] = p_data->notify.value;
-            memcpy(BUFFER+(PACKET_STORE_COUNT*sizeof(sensor_packet_t)),p_data->notify.value,sizeof(sensor_packet_t));
-            PACKET_STORE_COUNT += 1;
-        } 
-        else {
-            // drop the data
-            ESP_LOGI(TAG, "Sending the Packets Over");
-            //copy over the buffer to the sensor_packet object
-            memcpy(sensor_packet_set,BUFFER,sizeof(BUFFER));
-            memset(BUFFER,0,sizeof(BUFFER));
-            tcp_send_task(sensor_packet_set, sizeof(sensor_packet_set));
+    if (packet_store_count < PACKET_STORE_LIMIT) {
+        // store the data
+        // xEventGroupWaitBits(storage_event_group, STORAGE_SEMA, false, true, portMAX_DELAY);
+        // xEventGroupClearBits(storage_event_group, STORAGE_SEMA);
+        memcpy(BUFFER+(packet_store_count*PACKET_SIZE), p_data->notify.value, PACKET_SIZE);
+        packet_store_count++;
+        ESP_LOGI(TAG, "Stored measurement %d", packet_store_count);
+        if (packet_store_count == PACKET_STORE_LIMIT) {
+            cond_full = true;
         }
-    //}
+        // xEventGroupSetBits(storage_event_group, STORAGE_SEMA);
+    } 
+    else {
+        // drop the data
+        ESP_LOGE(TAG, "Out of room for data");
+        // TODO: disconnect
+    }
     return;
 }
 
+void connect_wifi(bool connect) {
+    if (connect) {
+        esp_wifi_connect();
+        // xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
+        cond_wifi_conn = true;
+        s_led_state = 1;
+        blink_led();
+        fwd_stored_data();
+    } else {
+        esp_wifi_disconnect();
+        // xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        cond_wifi_conn = false;
+        s_led_state = 0;
+        blink_led();
+    }
+}
+
 void set_wifi_status(bool connected) {
-    // wifi_connect = connected;
+    cond_wifi_conn = connected;
     if (connected) {
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         s_led_state = 1;
         blink_led();
+        fwd_stored_data();
     } else {
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         s_led_state = 0;
@@ -380,11 +413,43 @@ void set_wifi_status(bool connected) {
 
 void handle_recv_data(esp_ble_gattc_cb_param_t* p_data) {
     esp_log_buffer_hex(GATTC_TAG, p_data->notify.value, p_data->notify.value_len);
-    if (wifi_connect) {
+    if (cond_wifi_conn) {
         fwd_recv_data(p_data);
     } else {
         store_recv_data(p_data);
+        if (cond_full) {
+            // TODO: disconnect
+            esp_ble_gap_disconnect(last_connected_bda);
+            // if (cond_wifi_conn) {
+            //     s_state = SEND;
+            // } else {
+            //     s_state = WAIT;
+            //     // TODO: disconnect
+            // }
+        }
     }
+}
+
+void fwd_stored_data() {
+    int errno;
+    // xEventGroupWaitBits(storage_event_group, STORAGE_SEMA, false, true, portMAX_DELAY);
+    // xEventGroupClearBits(storage_event_group, STORAGE_SEMA);
+    for (int i = packet_store_count-1; i >= 0; i--) {
+        memcpy(sensor_packet, BUFFER+(PACKET_SIZE*(packet_store_count-1)), PACKET_SIZE);
+        errno = tcp_send_task(sensor_packet, PACKET_SIZE);
+        // packet_store_count--;
+        if (errno) {
+            ESP_LOGE(TAG, "Unable to forward stored data");
+            return;
+        } else {
+            packet_store_count--;
+            ESP_LOGI(TAG, "%d packets remaining", packet_store_count);
+        }
+    }
+    // xEventGroupSetBits(storage_event_group, STORAGE_SEMA);
+    ESP_LOGI(TAG, "Forward stored data DONE.");
+    // esp_ble_gap_start_scanning(30);
+    esp_restart();
 }
 
 void fwd_recv_data(esp_ble_gattc_cb_param_t* p_data) {
@@ -608,7 +673,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         ESP_LOGI(GATTC_TAG, "write char success ");
         break;
     case ESP_GATTC_DISCONNECT_EVT:
-        ble_connect = false;
+        cond_ble_conn = false;
         get_server = false;
         ESP_LOGI(GATTC_TAG, "ESP_GATTC_DISCONNECT_EVT, reason = %d", p_data->disconnect.reason);
         break;
@@ -643,7 +708,6 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         switch (scan_result->scan_rst.search_evt) {
         case ESP_GAP_SEARCH_INQ_RES_EVT:
             esp_log_buffer_hex(GATTC_TAG, scan_result->scan_rst.bda, 6);
-            memcpy(last_connected_bda, scan_result->scan_rst.bda, sizeof(esp_bd_addr_t));
             ESP_LOGI(GATTC_TAG, "searched Adv Data Len %d, Scan Response Len %d", scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
             // adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
             //                                     ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
@@ -668,12 +732,13 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             if (adv_name != NULL) {
                 if (strlen(remote_device_name) == adv_name_len && strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
                     ESP_LOGI(GATTC_TAG, "searched device %s\n", remote_device_name);
-                    if (ble_connect == false) {
-                        ble_connect = true;
+                    if (cond_ble_conn == false) {
+                        cond_ble_conn = true;
                         ESP_LOGI(GATTC_TAG, "connect to the remote device.");
                         esp_ble_gap_stop_scanning();
                         esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if, scan_result->scan_rst.bda, scan_result->scan_rst.ble_addr_type, true);
                     }
+                    memcpy(last_connected_bda, scan_result->scan_rst.bda, sizeof(esp_bd_addr_t));
                 }
             }
             break;
@@ -755,7 +820,8 @@ static void gpio_task_example(void* arg)
     for(;;) {
         if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
             printf("GPIO[%"PRIu32"] intr, val: %d\n", io_num, gpio_get_level(io_num));
-            set_wifi_status(!s_led_state);
+            connect_wifi(!s_led_state);
+            // set_wifi_status(!s_led_state);
         }
     }
 }
