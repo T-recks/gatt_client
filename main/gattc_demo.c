@@ -68,7 +68,7 @@ static QueueHandle_t gpio_evt_queue = NULL;
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
-static EventGroupHandle_t storage_event_group;
+//static EventGroupHandle_t storage_event_group;
 
 /* The event group allows multiple bits for each event,
    but we only care about one event - are we connected
@@ -136,7 +136,7 @@ esp_bd_addr_t last_connected_bda;
 static bool cond_ble_conn = false;
 static bool get_server = false;
 static bool cond_full = false;
-static bool cond_empty = true;
+//static bool cond_empty = true;
 static bool cond_wifi_conn = false;
 
 
@@ -295,8 +295,8 @@ static int tcp_send_task(uint8_t *data, size_t len)
         .ai_socktype = SOCK_STREAM,
     };
     struct addrinfo *res;
-    int s, r;
-    char recv_buf[64];
+    //int s, r;
+    //char recv_buf[64];
 
     ESP_LOGI(TAG, "%s", REQUEST);
 
