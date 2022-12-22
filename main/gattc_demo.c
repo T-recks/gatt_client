@@ -78,11 +78,12 @@ const int STORAGE_SEMA = BIT1;
 
 const int BASE_LENGTH = 24;
 
-#define WEB_SERVER "10.20.96.190"
+#define WEB_SERVER "10.20.96.212"
 #define WEB_PORT "8000"
 // static const char* WEB_URL = "http://10.20.96.190";
 
 static uint8_t s_led_state = 0;
+static bool first_disconnect = false;
 
 #define GATTC_TAG "GATTC_DEMO"
 static const char* TAG = "SIMPLE_FORWARD";
@@ -204,7 +205,7 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
 /*
  * STORAGE setup
  */
-#define PACKET_STORE_LIMIT 2
+#define PACKET_STORE_LIMIT 50
 #define PACKET_SIZE 16
 static int packet_store_count = 0;
 typedef uint8_t sensor_packet_t[16];
@@ -334,26 +335,26 @@ static int tcp_send_task(uint8_t *data, size_t len)
     }
 
     /* Set Timeout & Wait for Response */
-    struct timeval receiving_timeout;
-    receiving_timeout.tv_sec = 5;
-    receiving_timeout.tv_usec = 0;
-    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &receiving_timeout,
-            sizeof(receiving_timeout)) < 0) {
-        ESP_LOGE(TAG, "... failed to set socket receiving timeout");
-        close(s);
-        return 1;
-    }
+    // struct timeval receiving_timeout;
+    // receiving_timeout.tv_sec = 5;
+    // receiving_timeout.tv_usec = 0;
+    // if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &receiving_timeout,
+    //         sizeof(receiving_timeout)) < 0) {
+    //     ESP_LOGE(TAG, "... failed to set socket receiving timeout");
+    //     close(s);
+    //     return 1;
+    // }
 
     /* Read response */
-    do {
-        bzero(recv_buf, sizeof(recv_buf));
-        r = read(s, recv_buf, sizeof(recv_buf)-1);
+    // do {
+    //     bzero(recv_buf, sizeof(recv_buf));
+    //     r = read(s, recv_buf, sizeof(recv_buf)-1);
 
-        for(int i = 0; i < r; i++) {
-            putchar(recv_buf[i]);
-        }
+    //     for(int i = 0; i < r; i++) {
+    //         putchar(recv_buf[i]);
+    //     }
 
-    } while(r > 0);
+    // } while(r > 0);
 
     putchar('\n');
     close(s);
@@ -382,21 +383,29 @@ void store_recv_data(esp_ble_gattc_cb_param_t *p_data) {
     return;
 }
 
+void set_led(bool on) {
+    if (on) {
+        s_led_state = 1;
+        blink_led();
+    } else {
+        s_led_state = 0;
+        blink_led();
+    }
+}
+
 void connect_wifi(bool connect) {
     if (connect) {
         esp_wifi_connect();
         // xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
         cond_wifi_conn = true;
-        s_led_state = 1;
-        blink_led();
+        set_led(true);
         fwd_stored_data();
     } else {
         esp_wifi_disconnect();
         // xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         cond_wifi_conn = false;
-        s_led_state = 0;
-        blink_led();
+        set_led(false);
     }
 }
 
@@ -404,12 +413,14 @@ void set_wifi_status(bool connected) {
     cond_wifi_conn = connected;
     if (connected) {
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        s_led_state = 1;
-        blink_led();
+        set_led(true);
+        first_disconnect = true;
     } else {
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        s_led_state = 0;
-        blink_led();
+        if (first_disconnect) {
+            set_led(false);
+        }
+        first_disconnect = false;
     }
 }
 
@@ -488,6 +499,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         if (mtu_ret){
             ESP_LOGE(GATTC_TAG, "config MTU error, error code = %x", mtu_ret);
         }
+        set_led(true);
         break;
     }
     case ESP_GATTC_OPEN_EVT:
@@ -686,6 +698,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         cond_ble_conn = false;
         get_server = false;
         ESP_LOGI(GATTC_TAG, "ESP_GATTC_DISCONNECT_EVT, reason = %d", p_data->disconnect.reason);
+        set_led(false);
         break;
     default:
         break;
