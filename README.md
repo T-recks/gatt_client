@@ -120,3 +120,5 @@ For any technical queries, please open an [issue](https://github.com/espressif/e
 
 ## Todos
 Update event loop code to use new lib: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/esp_event.html
+
+Current event code is depracated. See https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/event-handling.html#legacy-event-loop
