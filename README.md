@@ -117,3 +117,6 @@ I (2185) GATTC_DEMO:
 ## Troubleshooting
 
 For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+
+## Todos
+Update event loop code to use new lib: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/esp_event.html
